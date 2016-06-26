@@ -33,45 +33,20 @@ from six.moves import urllib
 from six.moves import xrange  # pylint: disable=redefined-builtin
 import tensorflow as tf
 
-SOURCE_URL = 'http://yann.lecun.com/exdb/mnist/'
-WORK_DIRECTORY = 'data'
-IMAGE_SIZE = 28
+IMAGE_SHAPE = (240, 320)
 NUM_CHANNELS = 1
-PIXEL_DEPTH = 255
-NUM_LABELS = 10
-VALIDATION_SIZE = 5000  # Size of the validation set.
+PIXEL_DEPTH = 1.0
+NUM_LABELS = 2
+VALIDATION_SIZE = 90  # Size of the validation set.
 SEED = 66478  # Set to None for random seed.
 BATCH_SIZE = 64
 NUM_EPOCHS = 10
 EVAL_BATCH_SIZE = 64
-EVAL_FREQUENCY = 100  # Number of steps between evaluations.
+EVAL_FREQUENCY = 1  # Number of steps between evaluations.
 
 
 tf.app.flags.DEFINE_boolean("self_test", False, "True if running a self test.")
-tf.app.flags.DEFINE_boolean('use_fp16', False,
-                            "Use half floats instead of full floats if True.")
 FLAGS = tf.app.flags.FLAGS
-
-
-def data_type():
-  """Return the type of the activations, weights, and placeholder variables."""
-  if FLAGS.use_fp16:
-    return tf.float16
-  else:
-    return tf.float32
-
-
-def maybe_download(filename):
-  """Download the data from Yann's website, unless it's already here."""
-  if not tf.gfile.Exists(WORK_DIRECTORY):
-    tf.gfile.MakeDirs(WORK_DIRECTORY)
-  filepath = os.path.join(WORK_DIRECTORY, filename)
-  if not tf.gfile.Exists(filepath):
-    filepath, _ = urllib.request.urlretrieve(SOURCE_URL + filename, filepath)
-    with tf.gfile.GFile(filepath) as f:
-      size = f.Size()
-    print('Successfully downloaded', filename, size, 'bytes.')
-  return filepath
 
 
 def extract_data(filename, num_images):
@@ -80,29 +55,23 @@ def extract_data(filename, num_images):
   Values are rescaled from [0, 255] down to [-0.5, 0.5].
   """
   print('Extracting', filename)
-  with gzip.open(filename) as bytestream:
-    bytestream.read(16)
-    buf = bytestream.read(IMAGE_SIZE * IMAGE_SIZE * num_images)
-    data = numpy.frombuffer(buf, dtype=numpy.uint8).astype(numpy.float32)
-    data = (data - (PIXEL_DEPTH / 2.0)) / PIXEL_DEPTH
-    data = data.reshape(num_images, IMAGE_SIZE, IMAGE_SIZE, 1)
-    return data
+  data = numpy.fromfile(filename, dtype=numpy.float16, count=IMAGE_SHAPE[0] * IMAGE_SHAPE[1] * num_images)
+  data = (data - (PIXEL_DEPTH / 2.0)) / PIXEL_DEPTH
+  data = data.reshape(num_images, IMAGE_SHAPE[0], IMAGE_SHAPE[1], 1)
+  return data
 
 
 def extract_labels(filename, num_images):
   """Extract the labels into a vector of int64 label IDs."""
   print('Extracting', filename)
-  with gzip.open(filename) as bytestream:
-    bytestream.read(8)
-    buf = bytestream.read(1 * num_images)
-    labels = numpy.frombuffer(buf, dtype=numpy.uint8).astype(numpy.int64)
+  labels = numpy.fromfile(filename, dtype=numpy.float16, count=num_images)
   return labels
 
 
 def fake_data(num_images):
   """Generate a fake dataset that matches the dimensions of MNIST."""
   data = numpy.ndarray(
-      shape=(num_images, IMAGE_SIZE, IMAGE_SIZE, NUM_CHANNELS),
+      shape=(num_images, IMAGE_SHAPE[0], IMAGE_SHAPE[1], NUM_CHANNELS),
       dtype=numpy.float32)
   labels = numpy.zeros(shape=(num_images,), dtype=numpy.int64)
   for image in xrange(num_images):
@@ -129,16 +98,17 @@ def main(argv=None):  # pylint: disable=unused-argument
     num_epochs = 1
   else:
     # Get the data.
-    train_data_filename = maybe_download('train-images-idx3-ubyte.gz')
-    train_labels_filename = maybe_download('train-labels-idx1-ubyte.gz')
-    test_data_filename = maybe_download('t10k-images-idx3-ubyte.gz')
-    test_labels_filename = maybe_download('t10k-labels-idx1-ubyte.gz')
-
+    train_data_filename = './data/ISBI2016_ISIC_Part3_Training_Data-prepared.bin'
+    train_labels_filename = './data/ISBI2016_ISIC_Part3_Training_GroundTruth.bin'
+    test_data_filename = './data/ISBI2016_ISIC_Part3_Test_Data-prepared.bin'
+    test_labels_filename = './data/ISBI2016_ISIC_Part3_Test_GroundTruth.bin'
+    
     # Extract it into numpy arrays.
-    train_data = extract_data(train_data_filename, 60000)
-    train_labels = extract_labels(train_labels_filename, 60000)
-    test_data = extract_data(test_data_filename, 10000)
-    test_labels = extract_labels(test_labels_filename, 10000)
+    # TODO(smike): randomize input order not to bias training/validation sets.
+    train_data = extract_data(train_data_filename, 900)
+    train_labels = extract_labels(train_labels_filename, 900)
+    test_data = extract_data(test_data_filename, 379)
+    test_labels = extract_labels(test_labels_filename, 379)
 
     # Generate a validation set.
     validation_data = train_data[:VALIDATION_SIZE, ...]
@@ -152,12 +122,12 @@ def main(argv=None):  # pylint: disable=unused-argument
   # These placeholder nodes will be fed a batch of training data at each
   # training step using the {feed_dict} argument to the Run() call below.
   train_data_node = tf.placeholder(
-      data_type(),
-      shape=(BATCH_SIZE, IMAGE_SIZE, IMAGE_SIZE, NUM_CHANNELS))
+      tf.float32,
+      shape=(BATCH_SIZE, IMAGE_SHAPE[0], IMAGE_SHAPE[1], NUM_CHANNELS))
   train_labels_node = tf.placeholder(tf.int64, shape=(BATCH_SIZE,))
   eval_data = tf.placeholder(
-      data_type(),
-      shape=(EVAL_BATCH_SIZE, IMAGE_SIZE, IMAGE_SIZE, NUM_CHANNELS))
+      tf.float32,
+      shape=(EVAL_BATCH_SIZE, IMAGE_SHAPE[0], IMAGE_SHAPE[1], NUM_CHANNELS))
 
   # The variables below hold all the trainable weights. They are passed an
   # initial value which will be assigned when we call:
@@ -165,24 +135,24 @@ def main(argv=None):  # pylint: disable=unused-argument
   conv1_weights = tf.Variable(
       tf.truncated_normal([5, 5, NUM_CHANNELS, 32],  # 5x5 filter, depth 32.
                           stddev=0.1,
-                          seed=SEED, dtype=data_type()))
-  conv1_biases = tf.Variable(tf.zeros([32], dtype=data_type()))
-  conv2_weights = tf.Variable(tf.truncated_normal(
-      [5, 5, 32, 64], stddev=0.1,
-      seed=SEED, dtype=data_type()))
-  conv2_biases = tf.Variable(tf.constant(0.1, shape=[64], dtype=data_type()))
-  fc1_weights = tf.Variable(  # fully connected, depth 512.
-      tf.truncated_normal([IMAGE_SIZE // 4 * IMAGE_SIZE // 4 * 64, 512],
+                          seed=SEED))
+  conv1_biases = tf.Variable(tf.zeros([32]))
+  conv2_weights = tf.Variable(
+      tf.truncated_normal([5, 5, 32, 64],
                           stddev=0.1,
-                          seed=SEED,
-                          dtype=data_type()))
-  fc1_biases = tf.Variable(tf.constant(0.1, shape=[512], dtype=data_type()))
-  fc2_weights = tf.Variable(tf.truncated_normal([512, NUM_LABELS],
-                                                stddev=0.1,
-                                                seed=SEED,
-                                                dtype=data_type()))
-  fc2_biases = tf.Variable(tf.constant(
-      0.1, shape=[NUM_LABELS], dtype=data_type()))
+                          seed=SEED))
+  conv2_biases = tf.Variable(tf.constant(0.1, shape=[64]))
+  fc1_weights = tf.Variable(  # fully connected, depth 512.
+      tf.truncated_normal(
+          [IMAGE_SHAPE[0] // 4 * IMAGE_SHAPE[1] // 4 * 64, 512],
+          stddev=0.1,
+          seed=SEED))
+  fc1_biases = tf.Variable(tf.constant(0.1, shape=[512]))
+  fc2_weights = tf.Variable(
+      tf.truncated_normal([512, NUM_LABELS],
+                          stddev=0.1,
+                          seed=SEED))
+  fc2_biases = tf.Variable(tf.constant(0.1, shape=[NUM_LABELS]))
 
   # We will replicate the model structure for the training subgraph, as well
   # as the evaluation subgraphs, while sharing the trainable parameters.
@@ -240,7 +210,7 @@ def main(argv=None):  # pylint: disable=unused-argument
 
   # Optimizer: set up a variable that's incremented once per batch and
   # controls the learning rate decay.
-  batch = tf.Variable(0, dtype=data_type())
+  batch = tf.Variable(0)
   # Decay once per epoch, using an exponential schedule starting at 0.01.
   learning_rate = tf.train.exponential_decay(
       0.01,                # Base learning rate.
